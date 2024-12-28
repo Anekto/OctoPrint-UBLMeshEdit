@@ -65,45 +65,50 @@ class UBLMeshEditPlugin(octoprint.plugin.AssetPlugin,
 		return None
 
 	def on_gcode_recieved(self, comm, line, *args, **kwargs):
-		if ((not self.wait_mesh) and (not self.wait_ok)) or line.strip() in ['','wait','Not SD printing'] or line.strip()[:2]=='T:':
+			if not self.wait_g29 or line.strip()=='wait' or line.strip()=='Not SD printing': return line # early out
+
+			if line.strip() == 'Mesh Bed Leveling has no data.':
+				self.mesh_data = None
+				self.wait_g29 = False
+				self.send_mesh_collected_event()
+			elif 'Measured points:' in line:
+				self.mesh_data = [] # initialize empty mesh data
+				self.g29_mesh_line = -1 #ready for row count
+			elif self.g29_mesh_line is not None and self.g29_mesh_line > -1:
+				if self.g29_mesh_line == 0:
+					parts = line.strip().split()
+					if len(parts) > 2 and parts[1] == 'points:':
+						size = len(parts) - 2
+						if size != self._settings.get_int(['grid_size']):
+							self._logger.info(f"Mesh size {size} doesn't match plugin setting {self._settings.get_int(['grid_size'])}, changing to match")
+							self._settings.set_int(['grid_size'], size)
+							self._settings.save(trigger_event=True)
+
+				try:
+					# Parse each line, handling potential leading/trailing spaces
+					parts = line.strip().split()
+					row_index = int(parts[0])
+					if row_index == self.g29_mesh_line:
+						values = [float(x) for x in parts[1:]]
+						self.mesh_data.append(values)
+						self.g29_mesh_line += 1
+				except (ValueError, IndexError):
+					self._logger.debug(f"Skipping line: {line.strip()}")
+
+				if self.g29_mesh_line >= self._settings.get_int(['grid_size']):
+					self._logger.info("Got all mesh data")
+					self.wait_g29 = False
+					self.g29_mesh_line = None
+					self.send_mesh_collected_event()
+
+			elif self.g29_mesh_line == -1:
+				try:
+					self.g29_mesh_line = int(line[:line.find(':')])
+				except:
+					pass
+
 			return line
-
-		if line.strip() == 'Bed Topography Report for CSV:':
-			self._logger.info('Found mesh topo header')
-			self.in_topo = True
-			self.mesh_data = []
-			self.not_ubl = False
-		elif line.strip() == 'Bilinear Leveling Grid:':
-			self.in_topo = True
-			self.mesh_data = []
-			self.slot_num = None
-			self.skip_first = True
-			self.skip_line = True
-			self.not_ubl = True
-		elif line.strip() in ['Mesh is valid','Mesh is invalid','echo:Bed Leveling OFF', 'echo:Bed Leveling ON'] or line.startswith('Subdivided with'):
-			self._logger.info('found mesh footer')
-			self.in_topo = False
-		elif line.strip() == 'ok' or line.strip()[:2]=='ok':
-			self.wait_mesh = False
-			self.skip_first = False
-			if self.wait_ok:
-				self.wait_ok = False
-				self.send_command_complete_event()
-			self.send_mesh_collected_event()
-		elif 'Storage slot:' in line.strip():
-			self.slot_num = int(line.strip()[13:])
-		elif self.in_topo:
-			if self.skip_line:
-				self.skip_line = False
-			else:
-				row = list(map(float,line.strip().split()))
-				row = [None if v != v else v for v in row] # convert NAN to None
-				self._logger.info('got mesh row: {0}'.format(row))
-				if self.skip_first: row = row[1:]
-				self.mesh_data.append(row)
-
-		return line
-
+			
 	def on_atcommand_sending(self, comm, phase, cmd, params, tags=None, *args, **kwargs):
 		if cmd == 'UBLMESHEDIT': self.wait_mesh = True
 
@@ -184,4 +189,3 @@ def __plugin_load__():
 		"octoprint.comm.protocol.atcommand.sending": __plugin_implementation__.on_atcommand_sending,
 		"octoprint.events.register_custom_events": __plugin_implementation__.register_custom_events
 	}
-
